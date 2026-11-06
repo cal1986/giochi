@@ -528,10 +528,24 @@ const wait=ms=>new Promise(r=>setTimeout(r,ms));
 let tvSend=null;
 const newCode=len=>Array.from({length:len},()=>"abcdefghjkmnpqrstuvwxyz23456789"[Math.random()*31|0]).join("");
 const peerOpts=()=>Object.assign({debug:0},window.__PEER_OPTS||{});
-function loadPeer(){return new Promise((ok,ko)=>{if(window.Peer)return ok();
- const tryS=l=>{if(!l.length)return ko();const sc=document.createElement("script");sc.src=l[0];sc.onload=()=>window.Peer?ok():tryS(l.slice(1));sc.onerror=()=>{sc.remove();tryS(l.slice(1))};document.head.appendChild(sc)};
- tryS(["peerjs.min.js","https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js"])})}
-async function tvMain(){if(CLAUDE)return tvRoom();if(WEB)return tvPeer();roomState="none"}
+function loadLib(glob,list){return new Promise((ok,ko)=>{if(window[glob])return ok();
+ const tryS=l=>{if(!l.length)return ko();const sc=document.createElement("script");sc.src=l[0];sc.onload=()=>window[glob]?ok():tryS(l.slice(1));sc.onerror=()=>{sc.remove();tryS(l.slice(1))};document.head.appendChild(sc)};
+ tryS(list)})}
+const loadPeer=()=>loadLib("Peer",["peerjs.min.js","https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js"]);
+const loadMqtt=()=>loadLib("mqtt",["mqtt.min.js","https://cdn.jsdelivr.net/npm/mqtt@5.10.4/dist/mqtt.min.js"]);
+/* "ponte" via internet (MQTT): funziona anche quando il collegamento diretto non riesce. Si usano due servizi pubblici insieme */
+const BROKERS=()=>window.__MQTT_URLS||["wss://broker.emqx.io:8084/mqtt","wss://broker.hivemq.com:8884/mqtt"];
+function bridge(sub,onMsg,onState){
+ const cls=[];
+ for(const url of BROKERS()){let cl;
+  try{cl=mqtt.connect(url,{clientId:"vg"+newCode(10),clean:true,connectTimeout:8000,reconnectPeriod:4000,keepalive:30,protocolVersion:4})}catch(e){continue}
+  cl.on("connect",()=>{cl.subscribe(sub,{qos:0});onState()});
+  cl.on("close",onState);cl.on("offline",onState);cl.on("error",()=>{});
+  cl.on("message",(t,m)=>{let d;try{d=JSON.parse(typeof m==="string"?m:new TextDecoder().decode(m))}catch(e){return}onMsg(d)});
+  cls.push(cl)}
+ return{pub:(t,o)=>{const js=JSON.stringify(o);for(const c of cls)if(c.connected){try{c.publish(t,js,{qos:0})}catch(e){}}},any:()=>cls.some(c=>c.connected)};
+}
+async function tvMain(){if(CLAUDE)return tvRoom();if(WEB)return tvWeb();roomState="none"}
 async function tvRoom(){
  try{code=localStorage.getItem("pdcode")}catch(e){}
  if(!code||!/^[a-z0-9]{5}$/.test(code)){code=newCode(5);try{localStorage.setItem("pdcode",code)}catch(e){}}
@@ -542,34 +556,30 @@ async function tvRoom(){
  tvSend=st=>{if(RN)RN.presence(st).catch(()=>{})};roomState="ok";lastTV="";
  RN.onPeers(ch=>applyPads(ch.peers),()=>{roomState="none";RN=null;clearPads()});
 }
-async function tvPeer(){
- try{await loadPeer()}catch(e){roomState="err";return}
+/* sito normale: i telefoni arrivano sia col collegamento diretto (PeerJS) sia col ponte via internet; vale il messaggio più recente */
+async function tvWeb(){
  try{code=localStorage.getItem("pdcode6")}catch(e){}
  if(!code||!/^[a-z0-9]{6}$/.test(code)){code=newCode(6);try{localStorage.setItem("pdcode6",code)}catch(e){}}
- const pads=new Map(),conns=new Set();
+ const T0="vivgiochi/pd/"+code,pads=new Map(),conns=new Set();let MQ=null,p2p=false;
  const push=()=>applyPads([...pads].map(([k,v])=>({peer:k,presence:v.p})));
- tvSend=st=>{for(const c of conns)if(c.open){try{c.send(st)}catch(e){}}};
+ const take=d=>{if(!d||typeof d!=="object"||(d.pad!==1&&d.pad!==2))return;const id=String(d.id||"").slice(0,24);if(!id)return;
+  const q=+d.q||0,e=pads.get(id);if(e&&q<=e.q)return;pads.set(id,{p:d,t:Date.now(),q});push()};
+ const upd=()=>{if(p2p||(MQ&&MQ.any()))roomState="ok"};
+ tvSend=st=>{for(const c of conns)if(c.open){try{c.send(st)}catch(e){}}if(MQ)MQ.pub(T0+"/tv",st)};
+ setTimeout(()=>{if(roomState!=="ok")roomState="err"},9000);
+ loadMqtt().then(()=>{MQ=bridge(T0+"/pad",take,upd)}).catch(()=>{});
  let tries=0,peer=null;
  const start=()=>{
   peer=new Peer(NS+code,peerOpts());
-  peer.on("open",()=>{tries=0;roomState="ok";lastTV=""});
-  peer.on("connection",c=>{
-   c.on("open",()=>{conns.add(c);lastTV=""});
-   c.on("data",d=>{if(d&&typeof d==="object"&&(d.pad===1||d.pad===2)){pads.set(c.peer,{p:d,t:Date.now()});push()}});
-   const gone=()=>{conns.delete(c);if(pads.delete(c.peer))push()};
-   c.on("close",gone);c.on("error",gone);
-  });
-  /* se cade il collegamento al servizio, i telefoni già collegati continuano a funzionare: si riprova in silenzio */
+  peer.on("open",()=>{tries=0;p2p=true;upd();lastTV=""});
+  peer.on("connection",c=>{c.on("open",()=>{conns.add(c);lastTV=""});c.on("data",take);const gone=()=>conns.delete(c);c.on("close",gone);c.on("error",gone)});
   peer.on("disconnected",()=>setTimeout(()=>{if(!peer.destroyed&&peer.disconnected){try{peer.reconnect()}catch(e){}}},2000));
   peer.on("error",e=>{const t=e&&e.type;
-   if(t==="browser-incompatible"){roomState="none";return}
-   if(t==="peer-unavailable")return;
-   if(t==="unavailable-id"){peer.destroy();if(++tries>4){code=newCode(6);qrC={};tries=0;try{localStorage.setItem("pdcode6",code)}catch(_){}}setTimeout(start,2500);return}
-   if(!peer.open&&roomState!=="ok"){roomState="err";peer.destroy();setTimeout(start,4000)}
-  });
+   if(t==="browser-incompatible"||t==="peer-unavailable")return;
+   if(!peer.open){peer.destroy();if(++tries<6)setTimeout(start,t==="unavailable-id"?2500:5000)}});
  };
- start();
- setInterval(()=>{const now=Date.now();let ch=false;for(const [k,v] of pads)if(now-v.t>3500){pads.delete(k);ch=true}if(ch)push();lastTV=""},1500);
+ loadPeer().then(start).catch(()=>{});
+ setInterval(()=>{const now=Date.now();let ch=false;for(const [k,v] of pads)if(now-v.t>2500){pads.delete(k);ch=true}if(ch)push();lastTV=""},1000);
 }
 /* ---------- telefono: joystick ---------- */
 async function padMain(n,cd){
@@ -577,7 +587,7 @@ async function padMain(n,cd){
  const pad=document.getElementById("pad"),st=document.getElementById("pst"),$=id=>document.getElementById(id);
  pad.hidden=false;if(n===2)pad.classList.add("p2");$("pwho").textContent="GIOCATORE "+n;
  const counts=[0,0,0,0,0,0],held=new Map(),btns=[...pad.querySelectorAll("button[data-b]")];
- let bits=0,NR=null,wl=null,lastHp=null,tvSeen=false,sendFn=null;
+ let bits=0,NR=null,wl=null,lastHp=null,tvSeen=false,sendFn=null,chan=()=>"";
  const status=(cls,t)=>{st.className="st"+(cls?" "+cls:"");st.textContent=t};
  const buzz=ms=>{try{navigator.vibrate&&navigator.vibrate(ms)}catch(e){}};
  const wake=()=>{if(wl||!navigator.wakeLock)return;navigator.wakeLock.request("screen").then(w=>{wl=w;w.addEventListener("release",()=>{wl=null})}).catch(()=>{})};
@@ -599,7 +609,7 @@ async function padMain(n,cd){
   $("pch").textContent=nm;const bar=$("php");bar.style.width=hp+"%";bar.style.background=hp>30?"#4ade80":"#f87171";$("pwins").textContent="★".repeat(w);
   if((ph==="intro"||ph==="fight"||ph==="end")&&lastHp!==null&&hp<lastHp)buzz(70);lastHp=hp;
   const lk=Array.isArray(p.lk)&&p.lk[i];
-  status("ok",ph==="title"?"Collegato alla TV ✓ · premi un tasto per iniziare":ph==="select"?(lk?"Scelto ✓ · 🦶 CALCIO per cambiare":"Scegli il personaggio: ◀ ▶ e 👊 PUGNO"):ph==="over"?"👊 PUGNO = rivincita · 🦶 CALCIO = cambia personaggi":"Collegato alla TV ✓");
+  status("ok",(ph==="title"?"Collegato alla TV ✓ · premi un tasto per iniziare":ph==="select"?(lk?"Scelto ✓ · 🦶 CALCIO per cambiare":"Scegli il personaggio: ◀ ▶ e 👊 PUGNO"):ph==="over"?"👊 PUGNO = rivincita · 🦶 CALCIO = cambia personaggi":"Collegato alla TV ✓")+chan());
  };
  const evalPeers=ps=>{const tv=ps.find(p=>p.presence&&p.presence.tv===1);if(tv){tvSeen=true;show(tv.presence)}else status("",tvSeen?"La TV si è scollegata. Riapri il gioco sulla TV.":"Collegato. Aspetto la TV… (apri il gioco sulla TV)")};
  if(CLAUDE){
@@ -612,31 +622,37 @@ async function padMain(n,cd){
   NR.onConnection(c=>{if(c)evalPeers(NR.peers());else status("","Ricollegamento…")});
   return}
  if(!WEB){status("bad","Apri il link inquadrando il codice QR sulla TV.");return}
- try{await loadPeer()}catch(e){status("bad","Non riesco a caricare il collegamento: controlla internet e inquadra di nuovo il codice.");return}
- let peer=null,conn=null,timer=null,missing=false;
+ const T0="vivgiochi/pd/"+cd,sid=newCode(10),t0=Date.now();let q=0,MQ=null,peer=null,conn=null,timer=null,lastTvAt=0;
+ const direct=()=>!!(conn&&conn.open);
+ chan=()=>direct()?" · diretto":" · via internet";
+ const onTV=d=>{if(d&&d.tv===1){lastTvAt=Date.now();tvSeen=true;show(d)}};
+ sendFn=s=>{s.id=sid;s.q=++q;if(direct()){try{conn.send(s)}catch(e){}}if(MQ)MQ.pub(T0+"/pad",s)};
+ loadMqtt().then(()=>{MQ=bridge(T0+"/tv",onTV,()=>{})}).catch(()=>{});
  const retry=ms=>{clearTimeout(timer);timer=setTimeout(connect,ms)};
  function connect(){
+  if(!window.Peer)return;
   if(!peer||peer.destroyed){
    peer=new Peer(peerOpts());
    peer.on("open",connect);
    peer.on("disconnected",()=>{if(!peer.destroyed){try{peer.reconnect()}catch(e){}}});
-   peer.on("error",e=>{const t=e&&e.type;
-    if(t==="peer-unavailable"){missing=true;status("",tvSeen?"La TV si è scollegata. Riapri il gioco sulla TV…":"Non trovo la TV: apri il gioco sulla TV e aspetta qui…");retry(3000)}
-    else if(t==="browser-incompatible")status("bad","Questo browser non va bene: prova con Chrome o Safari.");
-    else{status("","Ricollegamento…");if(!peer.open)peer.destroy();retry(3000)}});
+   peer.on("error",()=>{if(!peer.open)peer.destroy();retry(4000)});
    return}
-  if(!peer.open||(conn&&conn.open))return;
+  if(!peer.open||direct())return;
   if(conn){try{conn.close()}catch(e){}}
-  if(!tvSeen&&!missing)status("","Mi collego alla TV…");
   const c=conn=peer.connect(NS+cd,{reliable:true});
-  c.on("open",()=>{if(c!==conn)return;sendFn=s=>{if(c.open){try{c.send(s)}catch(e){}}};send();status("ok","Collegato alla TV ✓")});
-  c.on("data",d=>{if(c===conn&&d&&d.tv===1){tvSeen=true;show(d)}});
-  c.on("close",()=>{if(c!==conn)return;sendFn=null;status("","La TV si è scollegata. Ricollegamento…");retry(2000)});
+  /* se il collegamento diretto non parte entro qualche secondo si riprova (intanto funziona il ponte via internet) */
+  setTimeout(()=>{if(c===conn&&!c.open){try{c.close()}catch(e){}retry(4000)}},8000);
+  c.on("open",()=>{if(c===conn)send()});
+  c.on("data",d=>{if(c===conn)onTV(d)});
+  c.on("close",()=>{if(c===conn)retry(2000)});
   c.on("error",()=>{});
  }
- connect();
- setInterval(send,300);/* battito: la TV sa che il telefono è ancora lì */
- document.addEventListener("visibilitychange",()=>{if(!document.hidden&&!(conn&&conn.open))retry(300)});
+ loadPeer().then(connect).catch(()=>{});
+ setInterval(()=>{send();const now=Date.now();
+  if(tvSeen&&now-lastTvAt>4500)status("","La TV non risponde: controlla che il gioco sia aperto sulla TV…");
+  else if(!tvSeen&&now-t0>9000)status("",(MQ&&MQ.any())||direct()?"Non trovo la TV: apri il gioco sulla TV con questo codice e aspetta qui…":"Non riesco a collegarmi: controlla che il telefono abbia internet…");
+ },300);
+ document.addEventListener("visibilitychange",()=>{if(!document.hidden&&!direct())retry(300)});
 }
 let last=performance.now(),acc=0;
 function loop(n){acc+=Math.min(100,n-last);last=n;while(acc>=16.667){tick();acc-=16.667}render();requestAnimationFrame(loop)}
