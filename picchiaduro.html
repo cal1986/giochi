@@ -84,7 +84,7 @@ body.padmode .wrap{display:none}
 <script async src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
 <script>
 /* indirizzo del gioco: il telefono lo apre con #g1-codice o #g2-codice e diventa il joystick */
-const GAME_URL="https://claude.ai/artifact/Wyngg7ri9LTzebJmyZDjca",VER="v3";
+const GAME_URL="https://claude.ai/artifact/Wyngg7ri9LTzebJmyZDjca",VER="v4";
 let lastErr="";addEventListener("error",e=>{lastErr=String(e.message||"errore").slice(0,60)});
 const PADM=/^#g([12])-([a-z0-9]{4,10})$/.exec(location.hash);
 /* dentro Claude il collegamento passa dalla "stanza" di Claude; su un sito normale (GitHub) telefoni e TV si collegano direttamente (PeerJS) */
@@ -103,9 +103,12 @@ let AC=null,master=null,nbuf=null,muted=false;
 const mb=document.getElementById("mute");
 function init(c){AC=c;const cp=c.createDynamicsCompressor();cp.threshold.value=-8;cp.knee.value=0;cp.ratio.value=12;cp.attack.value=.002;master=c.createGain();master.gain.value=1;master.connect(cp);cp.connect(c.destination);
  const n=c.sampleRate,b=c.createBuffer(1,n,c.sampleRate),d=b.getChannelData(0);for(let i=0;i<n;i++)d[i]=Math.random()*2-1;nbuf=b}
-function unlock(){try{if(!AC)init(new (window.AudioContext||window.webkitAudioContext)());if(AC.state==="suspended")AC.resume().catch(()=>{})}catch(e){}}
+let unlockedAt=-1e9;
+function unlock(){try{if(!AC){init(new (window.AudioContext||window.webkitAudioContext)());unlockedAt=performance.now()}if(AC.state==="suspended"){unlockedAt=performance.now();AC.resume().catch(()=>{})}}catch(e){}}
 function toggleMute(){muted=!muted;mb.textContent=muted?"🔇 Suoni spenti (tasto M)":"🔊 Suoni attivi (tasto M)"}
-mb.addEventListener("click",()=>{unlock();toggleMute();mb.blur();C.focus()});
+mb.addEventListener("click",()=>{unlock();if(performance.now()-unlockedAt>1500)toggleMute();mb.blur();C.focus()});
+/* qualsiasi tasto del telecomando, clic o tocco sulla TV accende l'audio (i browser lo permettono solo dopo un gesto) */
+["pointerdown","mousedown","click","touchend"].forEach(ev=>addEventListener(ev,unlock,{passive:true}));
 const ac=()=>muted?null:AC;
 function env(g,t,a,d,pk){g.gain.setValueAtTime(.001,t);g.gain.exponentialRampToValueAtTime(pk,t+a);g.gain.exponentialRampToValueAtTime(.001,t+a+d)}
 function nz(c,t,dur,type,f0,f1,vol){
@@ -473,7 +476,8 @@ function render(){
     if(roomState==="err")tx("Preparo i codici per i telefoni… (serve internet)",400,290,14,"#fca5a5")}}
   else{const w=P.find(f=>f.wins>=2),ph=padOn[1]||padOn[2];tx((w?w.d.name:"Nessuno")+" vince!",400,160,56,"#fde047");tx(ph?"SPAZIO o 👊 PUGNO per la rivincita":"Premi SPAZIO per la rivincita",400,215,24);tx(ph?"C o 🦶 CALCIO per cambiare personaggi":"C per cambiare personaggi",400,247,17,"#cbd5e1")}
  }
- if((phase==="title"||phase==="select")&&roomState==="ok"&&(!AC||AC.state!=="running"))tx("🔇 Per sentire i suoni premi OK sul telecomando (o clicca sul gioco)",400,393,12,"#cbd5e1");
+ if((roomState==="ok"||padOn[1]||padOn[2])&&(!AC||AC.state!=="running")){X.fillStyle="rgba(0,0,0,.7)";X.fillRect(150,380,500,20);tx("🔇 Per sentire i suoni premi OK sul telecomando (o clicca sul gioco)",400,394,12,"#fde047")}
+ else if(muted){X.save();X.textAlign="right";X.font="12px system-ui,sans-serif";X.fillStyle="#fde047";X.fillText("🔇 suoni spenti (tasto M)",790,394);X.restore()}
 }
 /* ---------- TV: codici QR e collegamento dei telefoni ---------- */
 const PCOL=["","#38bdf8","#fb923c"];
