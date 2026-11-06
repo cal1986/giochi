@@ -39,6 +39,7 @@ body.padmode .wrap{display:none}
 #pad .hp i{display:block;height:100%;width:100%;background:#4ade80;transition:width .15s}
 #pad .wins{color:#fbbf24;font-size:18px;min-width:2.4em}
 #pad .st{font-size:13px;color:#a0a0ab;width:100%}
+#pad .diag{font:12px ui-monospace,monospace;color:#7c7c8c;width:100%}
 #pad .st.ok{color:#4ade80}#pad .st.bad{color:#fca5a5}
 #pad .ctl{flex:1;display:flex;gap:18px;min-height:0}
 #pad .dpad,#pad .acts{flex:1;display:grid;gap:12px;min-width:0}
@@ -58,7 +59,7 @@ body.padmode .wrap{display:none}
 <body>
 <div id="pad" hidden>
  <header><span class="who" id="pwho">GIOCATORE 1</span><span class="ch" id="pch"></span><span class="hp"><i id="php"></i></span><span class="wins" id="pwins"></span>
- <span class="st" id="pst">Mi collego alla TV…</span></header>
+ <span class="st" id="pst">Mi collego alla TV…</span><span class="diag" id="pdiag"></span></header>
  <div class="turn">Gira il telefono in orizzontale: si gioca meglio.</div>
  <div class="ctl">
   <div class="dpad"><button class="u" data-b="2" aria-label="Salta">▲<small>SALTA</small></button><button class="l" data-b="0" aria-label="Sinistra">◀</button><button class="r" data-b="1" aria-label="Destra">▶</button></div>
@@ -83,7 +84,8 @@ body.padmode .wrap{display:none}
 <script async src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
 <script>
 /* indirizzo del gioco: il telefono lo apre con #g1-codice o #g2-codice e diventa il joystick */
-const GAME_URL="https://claude.ai/artifact/Wyngg7ri9LTzebJmyZDjca";
+const GAME_URL="https://claude.ai/artifact/Wyngg7ri9LTzebJmyZDjca",VER="v3";
+let lastErr="";addEventListener("error",e=>{lastErr=String(e.message||"errore").slice(0,60)});
 const PADM=/^#g([12])-([a-z0-9]{4,10})$/.exec(location.hash);
 /* dentro Claude il collegamento passa dalla "stanza" di Claude; su un sito normale (GitHub) telefoni e TV si collegano direttamente (PeerJS) */
 const CLAUDE=!!(window.claude&&window.claude.use),WEB=/^https?:$/.test(location.protocol);
@@ -501,6 +503,7 @@ function titleTV(){
  tx("VS",400,205,44,"#fb7185");
  tx(padOn[1]||padOn[2]?"Premi un tasto del telefono per iniziare":"Inquadra un codice per usare il telefono come joystick",400,342,21);
  tx("oppure SPAZIO sulla tastiera · al meglio dei tre round",400,366,13,"#cbd5e1");
+ X.save();X.textAlign="right";X.font="11px ui-monospace,monospace";X.fillStyle="#94a3b8";X.fillText(VER+" · codice "+code,790,394);X.restore();
 }
 function setTVmode(){if(padOn[1]||padOn[2])document.body.classList.add("tv")}
 function clearPads(){for(let n=1;n<=2;n++)for(let i=0;i<6;i++)K["Pd"+n+"_"+i]=0;padOn=[0,0,0];lastC.clear()}
@@ -627,7 +630,8 @@ async function padMain(n,cd){
  chan=()=>direct()?" · diretto":" · via internet";
  const onTV=d=>{if(d&&d.tv===1){lastTvAt=Date.now();tvSeen=true;show(d)}};
  sendFn=s=>{s.id=sid;s.q=++q;if(direct()){try{conn.send(s)}catch(e){}}if(MQ)MQ.pub(T0+"/pad",s)};
- loadMqtt().then(()=>{MQ=bridge(T0+"/tv",onTV,()=>{})}).catch(()=>{});
+ let libErr="";
+ loadMqtt().then(()=>{MQ=bridge(T0+"/tv",onTV,()=>{})}).catch(()=>{libErr+=" ponte-non-caricato"});
  const retry=ms=>{clearTimeout(timer);timer=setTimeout(connect,ms)};
  function connect(){
   if(!window.Peer)return;
@@ -647,8 +651,10 @@ async function padMain(n,cd){
   c.on("close",()=>{if(c===conn)retry(2000)});
   c.on("error",()=>{});
  }
- loadPeer().then(connect).catch(()=>{});
+ loadPeer().then(connect).catch(()=>{libErr+=" diretto-non-caricato"});
+ const dg=$("pdiag");
  setInterval(()=>{send();const now=Date.now();
+  dg.textContent=VER+" · codice "+cd+" · ponte "+(MQ&&MQ.any()?"✓":"✗")+" · diretto "+(direct()?"✓":"✗")+" · TV "+(tvSeen&&now-lastTvAt<4500?"✓":"✗")+libErr+(lastErr?" · "+lastErr:"");
   if(tvSeen&&now-lastTvAt>4500)status("","La TV non risponde: controlla che il gioco sia aperto sulla TV…");
   else if(!tvSeen&&now-t0>9000)status("",(MQ&&MQ.any())||direct()?"Non trovo la TV: apri il gioco sulla TV con questo codice e aspetta qui…":"Non riesco a collegarmi: controlla che il telefono abbia internet…");
  },300);
